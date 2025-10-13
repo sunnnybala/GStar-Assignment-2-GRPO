@@ -21,7 +21,7 @@ Main File: `starter.py`:
 ### Problem 1
 #### Part 1: GRPO Pipeline Implementation
 -   **Task 1**: Implement reward helper functions (`_extract_answer`, `_validate_numbers`, `_evaluate_equation`).
--   **Task 2**: Implement the main `reward_fn`.
+-   **Task 2**: Implement the main `reward_fn`. 
 -   **Task 3**: Implement `compute_group_normalized_advantages`.
 -   **Task 5**: Implement `masked mean` for GRPO and `masked_mean_drgrpo` for DR.GRPO.
 

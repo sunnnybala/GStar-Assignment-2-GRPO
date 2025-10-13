@@ -1,0 +1,16 @@
+venv/
+.venv/
+__pycache__/
+*.pyc
+.git/
+.DS_Store
+*.log
+*.tmp
+wandb/
+logs/
+outputs/
+tensorboard/
+*.pt
+*.bin
+*.safetensors
+data/

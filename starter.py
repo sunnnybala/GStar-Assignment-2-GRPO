@@ -20,6 +20,7 @@ import random
 from typing import Callable, Dict, List, Tuple, Any
 import logging
 import warnings
+from collections import Counter
 
 import torch
 import torch.nn.functional as F
@@ -135,7 +136,10 @@ def _extract_answer(solution_str: str) -> str | None:
         The stripped string content of the last answer tag, or None if no tag is found.
     """
     ### YOUR CODE HERE ###
-    pass
+    matches = re.findall(r"<answer>(.*?)</answer>", solution_str, flags=re.DOTALL)
+    if not matches:
+        return None
+    return matches[-1].strip()
     ### END YOUR CODE ###
 
 
@@ -155,8 +159,109 @@ def _validate_numbers(equation_str: str, available_numbers: List[int]) -> bool:
         True if the equation uses the correct numbers, False otherwise.
     """
     ### YOUR CODE HERE ###
-    pass
+    try:
+        used_numbers = [int(n) for n in re.findall(r"\d+", equation_str)]
+    except Exception:
+        return False
+    return Counter(used_numbers) == Counter(list(available_numbers))
     ### END YOUR CODE ###
+
+
+from typing import Union
+
+def tokenize(expr: str) -> Union[List[str], None]:
+    s = expr.replace(" ", "")
+    # allow digits, dot, + - * / and parentheses only
+    if re.search(r"[^0-9\.\+\-\*\/\(\)]", s):
+        return None
+    tokens = []
+    i = 0
+    L = len(s)
+    while i < L:
+        ch = s[i]
+        # Detect unary +/-
+        if ch in "+-" and (i == 0 or s[i-1] in "(*+-/"):
+            # If followed by a number, absorb the sign into the number token: e.g. 4 * -3 -> '4','*','-3'
+            if i + 1 < L and (s[i+1].isdigit() or s[i+1] == "."):
+                j = i + 1
+                while j < L and (s[j].isdigit() or s[j] == "."):
+                    j += 1
+                tokens.append(s[i:j])  # include sign
+                i = j
+            # If followed by '(', convert "-(" to "0 - (" so parentheses still parse correctly
+            elif i + 1 < L and s[i+1] == "(":
+                tokens.append("0")
+                tokens.append(ch)
+                i += 1
+            else:
+                return None
+        # Number
+        elif ch.isdigit() or ch == ".":
+            j = i
+            while j < L and (s[j].isdigit() or s[j] == "."):
+                j += 1
+            tokens.append(s[i:j])
+            i = j
+        # operator or parenthesis
+        elif ch in "+-*/()":
+            tokens.append(ch)
+            i += 1
+        else:
+            return None
+    return tokens
+
+def to_postfix(tokens: List[str]) -> Union[List[str], None]:
+    prec = {"+": 1, "-": 1, "*": 2, "/": 2}
+    output = []
+    ops = []
+    for t in tokens:
+        if re.fullmatch(r"[+-]?\d+\.\d*|[+-]?\.\d+|[+-]?\d+", t):  # number (maybe with sign)
+            output.append(t)
+        elif t in prec:
+            while ops and ops[-1] in prec and prec[ops[-1]] >= prec[t]:
+                output.append(ops.pop())
+            ops.append(t)
+        elif t == "(":
+            ops.append(t)
+        elif t == ")":
+            while ops and ops[-1] != "(":
+                output.append(ops.pop())
+            if not ops or ops[-1] != "(":
+                return None  # mismatched parentheses
+            ops.pop()
+        else:
+            return None
+    while ops:
+        if ops[-1] in ("(", ")"):
+            return None
+        output.append(ops.pop())
+    return output
+
+def eval_postfix(postfix: List[str]) -> Union[float, None]:
+    stack = []
+    for t in postfix:
+        if re.fullmatch(r"[+-]?\d+\.\d*|[+-]?\.\d+|[+-]?\d+", t):
+            stack.append(float(t))
+        elif t in {"+", "-", "*", "/"}:
+            if len(stack) < 2:
+                return None
+            b = stack.pop()
+            a = stack.pop()
+            if t == "+":
+                stack.append(a + b)
+            elif t == "-":
+                stack.append(a - b)
+            elif t == "*":
+                stack.append(a * b)
+            elif t == "/":
+                if b == 0:
+                    return None
+                stack.append(a / b)
+        else:
+            return None
+    if len(stack) != 1:
+        return None
+    return stack[0]
 
 
 def _evaluate_equation(equation_str: str) -> float | None:
@@ -166,9 +271,15 @@ def _evaluate_equation(equation_str: str) -> float | None:
         equation_str: The equation string to evaluate.
     Returns:
         The result of the equation as a float, or None if it's invalid or unsafe.
+
     """
-    ### YOUR CODE HERE ###
-    pass
+    tokens = tokenize(equation_str)
+    if tokens is None:
+        return None
+    postfix = to_postfix(tokens)
+    if postfix is None:
+        return None
+    return eval_postfix(postfix)
     ### END YOUR CODE ###
 
 # ==============================================================================
@@ -189,7 +300,20 @@ def reward_fn(generated_text: str, ground_truth: Dict) -> float:
         A float value representing the reward, such as 1.0, 0.1, or 0.0
     """
     ### YOUR CODE HERE ###
-    pass
+    answer = _extract_answer(generated_text)
+    if answer is None:
+        return 0.0
+    if not _validate_numbers(answer, ground_truth["numbers"]):
+        return 0.1
+    result = _evaluate_equation(answer)
+    if result is None:
+        return 0.1
+    target = ground_truth.get("target")
+    if isinstance(target, (int, float)):
+        if abs(float(result) - float(target)) < 1e-3:
+            return 1.0
+        return 0.1
+    return 0.1
     ### END YOUR CODE ###
 
 
@@ -318,7 +442,25 @@ def compute_group_normalized_advantages(
     # 7. Create a `metadata` dictionary with overall statistics of the raw rewards.
     advantages, raw_rewards, metadata = None, None, {}
     ### YOUR CODE HERE ###
-    pass
+    raw_rewards = torch.tensor([reward_fn(response, ground_truth) for response, ground_truth in zip(rollout_responses, repeated_ground_truths)])
+    raw_rewards = raw_rewards.reshape(-1, group_size)
+
+    group_means = raw_rewards.mean(dim=-1, keepdim=True)
+
+    advantages = raw_rewards - group_means
+
+    if normalize_by_std:
+        advantages = advantages / (raw_rewards.std(dim=-1, keepdim=True) + advantage_eps)
+    
+    advantages = advantages.flatten()
+
+    metadata = {
+        "mean": raw_rewards.mean().item(),
+        "std": raw_rewards.std().item(),
+        "max": raw_rewards.max().item(),
+        "min": raw_rewards.min().item(),
+    }
+
     ### END YOUR CODE ###
     return advantages, raw_rewards, metadata
 
@@ -349,9 +491,16 @@ def compute_loss(
     """
     loss = 0.0
     ### YOUR CODE HERE ###
-    pass
+    pi_ratio = torch.exp(policy_log_probs - old_log_probs)
+    unclipped_term = advantages * pi_ratio
+    clipped_term = advantages * torch.clamp(pi_ratio, 1-clip_range, 1+clip_range)
+    loss = -torch.minimum(unclipped_term, clipped_term)
+    metadata = {
+        "pi_ratio_mean": pi_ratio.mean().detach(),
+        "pi_ratio_std": pi_ratio.std(unbiased=False).detach(),
+    }
     ### END YOUR CODE ###
-    return loss
+    return loss, metadata
 
 
 def masked_mean(tensor: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -359,7 +508,12 @@ def masked_mean(tensor: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     Compute the mean of tensor values where mask=True for each row, then average across the batch.
     """
     ### YOUR CODE HERE ###
-    pass
+    # per-row mean over masked positions, then average across batch
+    mask = mask.to(dtype=tensor.dtype)
+    per_row_sum = (tensor * mask).sum(dim=-1)
+    per_row_count = mask.sum(dim=-1).clamp_min(1)
+    per_row_mean = per_row_sum / per_row_count
+    return per_row_mean.mean()
     ### END YOUR CODE ###
 
 def masked_mean_drgrpo(tensor: torch.Tensor, mask: torch.Tensor, num_tokens: int) -> torch.Tensor:
@@ -368,7 +522,12 @@ def masked_mean_drgrpo(tensor: torch.Tensor, mask: torch.Tensor, num_tokens: int
     This is used for the DR-GRPO loss
     """
     ### YOUR CODE HERE ###
-    pass
+    # sum over masked tokens divided by expected num_tokens per row, averaged across batch
+    mask = mask.to(dtype=tensor.dtype)
+    total_sum = (tensor * mask).sum()
+    batch_size = tensor.shape[0]
+    denom = max(1, num_tokens * batch_size)
+    return total_sum / denom
     ### END YOUR CODE ###
 
 def get_response_log_probs(model: PreTrainedModel, input_ids: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
@@ -493,7 +652,7 @@ def main() -> None:
 
     # CHANGING HYPERPARAMETERS for main assignment
     loss_type = "grpo" # or "dr_grpo"
-    max_tokens = 256 # or 512, 1024
+    max_tokens = 512 # or 512, 1024
     
     # Initialization
     use_std_norm = loss_type == "grpo"
@@ -526,7 +685,7 @@ def main() -> None:
     
     # Logging
     timestamp = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
-    log_dir = os.path.join("./output", "tb", f"hw_a2_{loss_type}", str(timestamp))
+    log_dir = os.path.join("/root/output", "tb", f"hw_a2_{loss_type}", str(timestamp))
     os.makedirs(log_dir, exist_ok=True)
     writer = SummaryWriter(log_dir=log_dir)
     
@@ -544,7 +703,7 @@ def main() -> None:
     )
     
     # Save model
-    out_dir = os.path.join("./output", f"hw_a2_solution_{timestamp}")
+    out_dir = os.path.join("/root/output", f"hw_a2_solution_{timestamp}")
     os.makedirs(out_dir, exist_ok=True)
     policy.save_pretrained(out_dir)
     tokenizer.save_pretrained(out_dir)
